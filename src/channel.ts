@@ -172,6 +172,12 @@ export const telexPlugin: ChannelPlugin<ResolvedTelexAccount> = {
 			hint: "<conversation_id> (16-char hex)",
 		},
 	},
+	mentions: {
+		// Inline mention tokens carry no display name, so the host's name-derived
+		// patterns never match them. The host also strips a leading `[...]` as an
+		// envelope before this runs, so the bracket half is optional here.
+		stripRegexes: () => [/(?:\[@[^\]]*\])?\(mention:[^)]+\)/g],
+	},
 	outbound: telexOutbound,
 	status: {
 		defaultRuntime: {

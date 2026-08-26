@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- Strip inline mention tokens before command detection.
+- Reply instead of dropping the message when the agent binding does not resolve.
+
 ## 1.1.0
 
 - Replace reconnect-only backfill with a persistent per-conversation sync driver (seq-based settle, repair windows, hourly reconciliation sweep), so a full process restart resumes from the server read cursor instead of starting cold.

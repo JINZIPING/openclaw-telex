@@ -14,7 +14,7 @@ import { type TelexClient, isAuthError, isConversationGone } from "./client.js";
 import { logger } from "./log.js";
 import { mediaMarkdownLink, mediaPlaceholder, resolveInboundMedia } from "./media.js";
 import { getTelexRuntime } from "./runtime.js";
-import { sendTelexMessage } from "./send.js";
+import { sendTelexMessage, textBlock } from "./send.js";
 import {
 	type ResolvedTelexAccount,
 	TelexBlockType,
@@ -431,24 +431,60 @@ async function dispatchTelexTurn(params: {
 	const accountId = account.accountId;
 	const isChannel = chatType === "channel";
 
-	const route = core.channel.routing.resolveAgentRoute({
-		cfg,
-		channel: "telex",
-		accountId,
-		peer: { kind: chatType, id: conversationId },
-	});
+	// Throws when a binding names an unconfigured agent, or when several agents
+	// exist with no single default; a merely missing binding falls back instead.
+	let route: ReturnType<typeof core.channel.routing.resolveAgentRoute>;
+	try {
+		route = core.channel.routing.resolveAgentRoute({
+			cfg,
+			channel: "telex",
+			accountId,
+			peer: { kind: chatType, id: conversationId },
+		});
+	} catch (err) {
+		log.error("agent route resolution failed", {
+			accountId,
+			conversationId,
+			chatType,
+			err: String(err),
+		});
+		await client
+			.sendMessage({
+				conversationId,
+				blocks: [
+					textBlock(
+						"I cannot route this message: the agent binding for this conversation does not resolve to a configured agent. Please ask this bot's owner to check the agent bindings.",
+					),
+				],
+			})
+			.catch((sendErr) => {
+				log.warn("route failure notice send failed", {
+					conversationId,
+					err: String(sendErr),
+				});
+			});
+		return;
+	}
 	const storePath = resolveStorePath(undefined, { agentId: route.agentId });
 
 	// A fork inherits its parent session; copied history bootstraps its first turn.
 	let parentSessionKey: string | undefined;
 	let forkHistory: { starterBody: string; historyBody: string } | undefined;
 	if (params.forkOfConversationId) {
-		parentSessionKey = core.channel.routing.resolveAgentRoute({
-			cfg,
-			channel: "telex",
-			accountId,
-			peer: { kind: "direct", id: params.forkOfConversationId },
-		}).sessionKey;
+		try {
+			parentSessionKey = core.channel.routing.resolveAgentRoute({
+				cfg,
+				channel: "telex",
+				accountId,
+				peer: { kind: "direct", id: params.forkOfConversationId },
+			}).sessionKey;
+		} catch (err) {
+			log.warn("parent route resolution failed; fork starts without history", {
+				accountId,
+				forkOfConversationId: params.forkOfConversationId,
+				err: String(err),
+			});
+		}
 		if (!readSessionUpdatedAt({ storePath, sessionKey: route.sessionKey })) {
 			forkHistory = await buildForkHistory({ cfg, client, conversationId }).catch((err) => {
 				log.warn("fork history build failed", {
