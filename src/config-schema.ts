@@ -9,9 +9,11 @@ export const TelexToolsConfigSchema = z
 	.object({
 		searchIdentities: z.boolean().optional().default(true),
 		getIdentities: z.boolean().optional().default(true),
+		updateIdentity: z.boolean().optional().default(true),
 		listConversations: z.boolean().optional().default(true),
 		getConversationInfo: z.boolean().optional().default(true),
 		createChannel: z.boolean().optional().default(true),
+		renameConversation: z.boolean().optional().default(true),
 		listMembers: z.boolean().optional().default(true),
 		addMembers: z.boolean().optional().default(true),
 		getConversationMessages: z.boolean().optional().default(true),

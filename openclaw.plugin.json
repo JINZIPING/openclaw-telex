@@ -34,9 +34,11 @@
 						"properties": {
 							"searchIdentities": { "type": "boolean" },
 							"getIdentities": { "type": "boolean" },
+							"updateIdentity": { "type": "boolean" },
 							"listConversations": { "type": "boolean" },
 							"getConversationInfo": { "type": "boolean" },
 							"createChannel": { "type": "boolean" },
+							"renameConversation": { "type": "boolean" },
 							"listMembers": { "type": "boolean" },
 							"addMembers": { "type": "boolean" },
 							"getConversationMessages": { "type": "boolean" }

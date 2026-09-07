@@ -83,9 +83,11 @@ When enabled, the plugin registers a `telex` tool so the agent can inspect Telex
 
 - `search_identities` - fuzzy find users/bots by name or email
 - `get_identities` - exact resolve by id and/or email
+- `update_identity` - edit the bot's own display name and/or description
 - `list_conversations` - chats and channels (paginated)
 - `get_conversation_info` - a conversation's details
 - `create_channel` - create a channel
+- `rename_conversation` - retitle a channel or a non-default chat
 - `list_members` - members of a conversation
 - `add_members` - add members to a channel
 - `get_conversation_messages` - messages in a conversation (chronological)
