@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add `rename_conversation` and `update_identity` tool actions.
+
 ## 1.1.1
 
 - Strip inline mention tokens before command detection.

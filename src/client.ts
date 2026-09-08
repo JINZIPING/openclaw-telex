@@ -287,6 +287,14 @@ export class TelexClient {
 		return conversation;
 	}
 
+	async renameConversation(conversationId: string, title: string): Promise<TelexConversation> {
+		const { conversation } = await this.post<{ conversation: TelexConversation }>(
+			"/rename-conversation",
+			{ conversation_id: conversationId, title },
+		);
+		return conversation;
+	}
+
 	async listMembers(conversationId: string): Promise<TelexMember[]> {
 		const res = await this.get<{ members?: TelexMember[] }>("/list-members", {
 			conversation_id: conversationId,
@@ -358,6 +366,18 @@ export class TelexClient {
 
 	async resolveIdentity(id: string): Promise<TelexIdentityBrief | undefined> {
 		return (await this.resolveIdentities([id])).get(id);
+	}
+
+	async updateIdentity(fields: {
+		displayName?: string;
+		description?: string;
+	}): Promise<TelexIdentityBrief> {
+		const { identity } = await this.post<{ identity: TelexIdentityBrief }>("/update-identity", {
+			display_name: fields.displayName,
+			description: fields.description,
+		});
+		writeCache(this.identityCache, identity.id, identity, IDENTITY_CACHE_MAX);
+		return identity;
 	}
 
 	async subscribe(

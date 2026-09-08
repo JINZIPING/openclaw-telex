@@ -23,9 +23,11 @@ function resolveToolsConfig(cfg?: TelexToolsConfig): ResolvedToolsConfig {
 	return {
 		searchIdentities: cfg?.searchIdentities ?? true,
 		getIdentities: cfg?.getIdentities ?? true,
+		updateIdentity: cfg?.updateIdentity ?? true,
 		listConversations: cfg?.listConversations ?? true,
 		getConversationInfo: cfg?.getConversationInfo ?? true,
 		createChannel: cfg?.createChannel ?? true,
+		renameConversation: cfg?.renameConversation ?? true,
 		listMembers: cfg?.listMembers ?? true,
 		addMembers: cfg?.addMembers ?? true,
 		getConversationMessages: cfg?.getConversationMessages ?? true,
@@ -97,7 +99,7 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 				name: "telex",
 				label: "Telex",
 				description:
-					"Telex operations. NOT for sending - use the message tool to reply. Actions: search_identities (fuzzy find users/bots by name or email), get_identities (exact resolve by id and/or email), list_conversations (chats + channels; filter with kind=1 for channels only), get_conversation_info (details by id), create_channel (new channel owned by the bot; members by id and/or email), list_members (conversation members), add_members (add members to a channel by id and/or email), get_conversation_messages (a conversation's message history, chronological). The channel management actions (create_channel, add_members) can be disabled per account.",
+					"Telex operations. NOT for sending - use the message tool to reply. Actions: search_identities (fuzzy find users/bots by name or email), get_identities (exact resolve by id and/or email), update_identity (edit the bot's own display name and/or description), list_conversations (chats + channels; filter with kind=1 for channels only), get_conversation_info (details by id), create_channel (new channel owned by the bot; members by id and/or email), rename_conversation (retitle a channel or non-default chat), list_members (conversation members), add_members (add members to a channel by id and/or email), get_conversation_messages (a conversation's message history, chronological). The mutating actions (update_identity, create_channel, rename_conversation, add_members) can be disabled per account.",
 				parameters: TelexToolSchema,
 				async execute(_toolCallId, params) {
 					const p = params as TelexToolParams;
@@ -135,6 +137,17 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 									),
 								});
 							}
+							case "update_identity":
+								if (!toolsCfg.updateIdentity)
+									return json({ error: "updateIdentity is disabled in config" });
+								return json({
+									identity: describeIdentity(
+										await client.updateIdentity({
+											displayName: p.display_name,
+											description: p.description,
+										}),
+									),
+								});
 							case "list_conversations": {
 								if (!toolsCfg.listConversations)
 									return json({
@@ -175,6 +188,16 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 									),
 								});
 							}
+							case "rename_conversation":
+								if (!toolsCfg.renameConversation)
+									return json({
+										error: "renameConversation is disabled in config",
+									});
+								return json({
+									conversation: describeConversation(
+										await client.renameConversation(p.conversation_id, p.title),
+									),
+								});
 							case "list_members": {
 								if (!toolsCfg.listMembers)
 									return json({ error: "listMembers is disabled in config" });

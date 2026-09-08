@@ -21,6 +21,15 @@ export const TelexToolSchema = Type.Union([
 		),
 	}),
 	Type.Object({
+		action: Type.Literal("update_identity", {
+			description: "Edit the bot's own display name and/or description.",
+		}),
+		display_name: Type.Optional(Type.String({ description: "New display name (1-100 chars)" })),
+		description: Type.Optional(
+			Type.String({ description: "New description (up to 200 chars)" }),
+		),
+	}),
+	Type.Object({
 		action: Type.Literal("list_conversations", {
 			description:
 				"List the bot's conversations (chats and channels), paginated. Filter with kind=1 to list only channels.",
@@ -49,6 +58,14 @@ export const TelexToolSchema = Type.Union([
 		emails: Type.Optional(
 			Type.Array(Type.String(), { description: "Member emails to resolve to identities" }),
 		),
+	}),
+	Type.Object({
+		action: Type.Literal("rename_conversation", {
+			description:
+				"Rename a channel or a non-default chat the bot is a member of. The default 1:1 chat cannot be renamed.",
+		}),
+		conversation_id: Type.String({ description: "Conversation id (16-char hex)" }),
+		title: Type.String({ description: "New title (1-200 chars)" }),
 	}),
 	Type.Object({
 		action: Type.Literal("list_members", {
