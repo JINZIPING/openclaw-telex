@@ -1,6 +1,8 @@
 import {
 	type TelexBlock,
 	TelexBlockType,
+	TelexChannelPermission,
+	type TelexChannelPermissionName,
 	type TelexConversation,
 	TelexConversationKind,
 	type TelexIdentityBrief,
@@ -47,8 +49,40 @@ export function describeIdentity(i: TelexIdentityBrief) {
 	};
 }
 
+type TelexChannelPermissionMap = Record<TelexChannelPermissionName, boolean>;
+
+function memberPermissions(flags: number): TelexChannelPermissionMap {
+	const out = {} as TelexChannelPermissionMap;
+	for (const [name, bit] of Object.entries(TelexChannelPermission)) {
+		out[name as TelexChannelPermissionName] = (flags & bit) === 0;
+	}
+	return out;
+}
+
+export function describeConversationBrief(c: TelexConversation) {
+	return {
+		id: c.id,
+		kind: conversationKindLabel[c.kind] ?? c.kind,
+		title: c.title,
+		is_default: c.is_default,
+		...(c.peer_id ? { peer_id: c.peer_id } : {}),
+		member_count: c.member_count,
+		last_seq: c.last_seq,
+	};
+}
+
 export function describeConversation(c: TelexConversation) {
-	return { ...c, kind: conversationKindLabel[c.kind] ?? c.kind };
+	const role = c.membership?.role;
+	return {
+		...describeConversationBrief(c),
+		...(c.kind === TelexConversationKind.CHANNEL
+			? {
+					announcement: c.data?.announcement ?? "",
+					member_permissions: memberPermissions(c.flags),
+					...(role !== undefined ? { my_role: memberRoleLabel[role] ?? role } : {}),
+				}
+			: {}),
+	};
 }
 
 export function describeMember(m: TelexMember, identities?: Map<string, TelexIdentityBrief>) {

@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Add `rename_conversation` and `update_identity` tool actions.
+- Add `rename_conversation`, `update_identity`, `update_conversation_settings`, `delete_conversation`, `update_member_role` and `remove_members` tool actions.
+- Report `member_permissions` and `my_role` on `get_conversation_info` actions.
 
 ## 1.1.1
 

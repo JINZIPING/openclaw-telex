@@ -34,11 +34,28 @@ export const TelexBlockType = {
 
 export const TelexConversationKind = { CHAT: 0, CHANNEL: 1 } as const;
 export const TelexMemberRole = { MEMBER: 0, ADMIN: 1, OWNER: 2 } as const;
+export const TelexMemberRoleByName: Record<string, number | undefined> = {
+	member: TelexMemberRole.MEMBER,
+	admin: TelexMemberRole.ADMIN,
+	owner: TelexMemberRole.OWNER,
+};
 export const TelexMessageStatus = { COMPLETED: 0, IN_PROGRESS: 1, ERROR: 2, ABORTED: 3 } as const;
 export const TelexMessageFlag = { NONE: 0, EVENT: 1, EDITED: 2, FORK_PREFIX: 4 } as const;
 export const TelexIdentityKind = { USER: 0, MATE_INSTANCE: 1, BOT: 2 } as const;
 export const TelexIdentityStatus = { ACTIVE: 0, RETIRED: 1 } as const;
 export const TelexToolStatus = { IN_PROGRESS: 0, SUCCESS: 1, ERROR: 2, ABORTED: 3 } as const;
+
+// TelexConversationFlag bits, keyed by the permission name the tool speaks. Restriction semantics:
+// a set bit limits the action to the channel owner and admins.
+export const TelexChannelPermission = {
+	add_members: 1,
+	remove_members: 2,
+	rename: 4,
+	announcement: 8,
+	mention_all: 16,
+} as const;
+
+export type TelexChannelPermissionName = keyof typeof TelexChannelPermission;
 
 export type TelexMedia = {
 	file_id: string;
@@ -102,6 +119,12 @@ export type TelexMember = {
 	read_seq?: number;
 };
 
+export type TelexConversationData = {
+	announcement?: string;
+	announcement_updater_id?: string;
+	announcement_update_time?: string | number;
+};
+
 export type TelexConversation = {
 	id: string;
 	kind: number;
@@ -113,6 +136,8 @@ export type TelexConversation = {
 	fork_of_message_id: string;
 	member_count: number;
 	last_seq: number;
+	flags: number;
+	data?: TelexConversationData;
 	create_time: string | number;
 	update_time: string | number;
 	membership?: TelexMember;
