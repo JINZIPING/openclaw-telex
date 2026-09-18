@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Add `rename_conversation` and `update_identity` tool actions.
+- Add the channel management tool actions: `update_conversation_settings` (permissions and announcement), `delete_conversation`, `remove_members` and `update_member_role` (including handing the channel over).
+- Report a channel's `member_permissions` and the bot's own `my_role` on `get_conversation_info`, and drop `membership` from conversation results.
 
 ## 1.1.1
 

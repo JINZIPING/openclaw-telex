@@ -3,12 +3,19 @@ import { listEnabledTelexAccounts, resolveTelexAccount } from "./accounts.js";
 import { type TelexClient, resolveTelexClient } from "./client.js";
 import {
 	describeConversation,
+	describeConversationBrief,
 	describeIdentity,
 	describeMember,
 	describeMessage,
 } from "./tool-format.js";
 import { type TelexToolParams, TelexToolSchema } from "./tool-schema.js";
-import type { ResolvedTelexAccount, TelexToolsConfig } from "./types.js";
+import {
+	type ResolvedTelexAccount,
+	TelexChannelPermission,
+	type TelexChannelPermissionName,
+	TelexMemberRoleByName,
+	type TelexToolsConfig,
+} from "./types.js";
 
 function json(data: unknown) {
 	return {
@@ -28,8 +35,12 @@ function resolveToolsConfig(cfg?: TelexToolsConfig): ResolvedToolsConfig {
 		getConversationInfo: cfg?.getConversationInfo ?? true,
 		createChannel: cfg?.createChannel ?? true,
 		renameConversation: cfg?.renameConversation ?? true,
+		updateConversationSettings: cfg?.updateConversationSettings ?? true,
+		deleteConversation: cfg?.deleteConversation ?? true,
 		listMembers: cfg?.listMembers ?? true,
 		addMembers: cfg?.addMembers ?? true,
+		removeMembers: cfg?.removeMembers ?? true,
+		updateMemberRole: cfg?.updateMemberRole ?? true,
 		getConversationMessages: cfg?.getConversationMessages ?? true,
 	};
 }
@@ -56,6 +67,21 @@ async function resolveMemberIds(
 		}
 	}
 	return { ids: [...ids] };
+}
+
+async function resolveOneIdentityId(
+	client: TelexClient,
+	identityId: string | undefined,
+	email: string | undefined,
+): Promise<{ id: string } | { error: string }> {
+	const resolved = await resolveMemberIds(
+		client,
+		identityId ? [identityId] : undefined,
+		email ? [email] : undefined,
+	);
+	if ("error" in resolved) return resolved;
+	if (resolved.ids.length !== 1) return { error: "provide exactly one identity_id or email" };
+	return { id: resolved.ids[0] };
 }
 
 export function registerTelexTool(api: OpenClawPluginApi) {
@@ -99,9 +125,11 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 				name: "telex",
 				label: "Telex",
 				description:
-					"Telex operations. NOT for sending - use the message tool to reply. Actions: search_identities (fuzzy find users/bots by name or email), get_identities (exact resolve by id and/or email), update_identity (edit the bot's own display name and/or description), list_conversations (chats + channels; filter with kind=1 for channels only), get_conversation_info (details by id), create_channel (new channel owned by the bot; members by id and/or email), rename_conversation (retitle a channel or non-default chat), list_members (conversation members), add_members (add members to a channel by id and/or email), get_conversation_messages (a conversation's message history, chronological). The mutating actions (update_identity, create_channel, rename_conversation, add_members) can be disabled per account.",
+					"Telex operations. NOT for sending - use the message tool to reply. Actions: search_identities (fuzzy find users/bots by name or email), get_identities (exact resolve by id and/or email), update_identity (edit the bot's own display name and/or description), list_conversations (chats + channels; filter with kind=1 for channels only), get_conversation_info (details by id: a channel's announcement, your my_role, and member_permissions, which owner and admins override), create_channel (new channel owned by the bot; members by id and/or email), rename_conversation (retitle a channel or non-default chat), update_conversation_settings (allow or deny channel members an action, and replace the announcement), delete_conversation (delete a channel the bot owns), list_members (conversation members), add_members (add members to a channel by id and/or email), remove_members (remove them the same way), update_member_role (member, admin, or owner to hand the channel over), get_conversation_messages (a conversation's message history, chronological).",
 				parameters: TelexToolSchema,
 				async execute(_toolCallId, params) {
+					// Tool-search dispatch reaches execute without validating input against the
+					// schema, so this cast can be wrong.
 					const p = params as TelexToolParams;
 					try {
 						const target = resolveTarget();
@@ -159,7 +187,7 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 									limit: p.limit,
 								});
 								return json({
-									conversations: res.conversations.map(describeConversation),
+									conversations: res.conversations.map(describeConversationBrief),
 									total: res.total,
 								});
 							}
@@ -183,7 +211,7 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 								);
 								if ("error" in resolved) return json(resolved);
 								return json({
-									conversation: describeConversation(
+									conversation: describeConversationBrief(
 										await client.createChannel(p.title, resolved.ids),
 									),
 								});
@@ -194,10 +222,65 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 										error: "renameConversation is disabled in config",
 									});
 								return json({
-									conversation: describeConversation(
+									conversation: describeConversationBrief(
 										await client.renameConversation(p.conversation_id, p.title),
 									),
 								});
+							case "update_conversation_settings": {
+								if (!toolsCfg.updateConversationSettings)
+									return json({
+										error: "updateConversationSettings is disabled in config",
+									});
+								const allow = p.allow ?? [];
+								const deny = p.deny ?? [];
+								const announcement = p.announcement;
+								if (
+									allow.length === 0 &&
+									deny.length === 0 &&
+									typeof announcement !== "string"
+								)
+									return json({
+										error: "provide a permission to allow or deny, or an announcement",
+									});
+								const unknown = [...allow, ...deny].filter(
+									(name) => !(name in TelexChannelPermission),
+								);
+								if (unknown.length > 0)
+									return json({
+										error: `unknown permissions: ${unknown.join(", ")}`,
+									});
+								const settings: { flags?: number; announcement?: string } = {};
+								if (allow.length > 0 || deny.length > 0) {
+									const mask = (names: TelexChannelPermissionName[]) =>
+										names.reduce(
+											(acc, name) => acc | TelexChannelPermission[name],
+											0,
+										);
+									const current = await client.getConversation(
+										p.conversation_id,
+										true,
+									);
+									settings.flags =
+										((current.flags ?? 0) | mask(deny)) & ~mask(allow);
+								}
+								if (typeof announcement === "string")
+									settings.announcement = announcement;
+								return json({
+									conversation: describeConversationBrief(
+										await client.updateConversationSettings(
+											p.conversation_id,
+											settings,
+										),
+									),
+								});
+							}
+							case "delete_conversation":
+								if (!toolsCfg.deleteConversation)
+									return json({
+										error: "deleteConversation is disabled in config",
+									});
+								await client.deleteConversation(p.conversation_id);
+								return json({ deleted: p.conversation_id });
 							case "list_members": {
 								if (!toolsCfg.listMembers)
 									return json({ error: "listMembers is disabled in config" });
@@ -231,6 +314,46 @@ export function registerTelexTool(api: OpenClawPluginApi) {
 								);
 								return json({
 									members: members.map((m) => describeMember(m, identities)),
+								});
+							}
+							case "remove_members": {
+								if (!toolsCfg.removeMembers)
+									return json({ error: "removeMembers is disabled in config" });
+								const resolved = await resolveMemberIds(
+									client,
+									p.identity_ids,
+									p.emails,
+								);
+								if ("error" in resolved) return json(resolved);
+								if (resolved.ids.length === 0)
+									return json({
+										error: "provide at least one identity_id or email",
+									});
+								await client.removeMembers(p.conversation_id, resolved.ids);
+								return json({ requested: resolved.ids });
+							}
+							case "update_member_role": {
+								if (!toolsCfg.updateMemberRole)
+									return json({
+										error: "updateMemberRole is disabled in config",
+									});
+								const role = TelexMemberRoleByName[p.role ?? ""];
+								if (role === undefined)
+									return json({ error: "role must be member, admin or owner" });
+								const resolved = await resolveOneIdentityId(
+									client,
+									p.identity_id,
+									p.email,
+								);
+								if ("error" in resolved) return json(resolved);
+								return json({
+									conversation: describeConversationBrief(
+										await client.updateMemberRole(
+											p.conversation_id,
+											resolved.id,
+											role,
+										),
+									),
 								});
 							}
 							case "get_conversation_messages":

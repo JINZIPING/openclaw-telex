@@ -295,6 +295,21 @@ export class TelexClient {
 		return conversation;
 	}
 
+	async updateConversationSettings(
+		conversationId: string,
+		settings: { flags?: number; announcement?: string },
+	): Promise<TelexConversation> {
+		const { conversation } = await this.post<{ conversation: TelexConversation }>(
+			"/update-conversation-settings",
+			{ conversation_id: conversationId, ...settings },
+		);
+		return conversation;
+	}
+
+	async deleteConversation(conversationId: string): Promise<void> {
+		await this.post("/delete-conversation", { conversation_id: conversationId });
+	}
+
 	async listMembers(conversationId: string): Promise<TelexMember[]> {
 		const res = await this.get<{ members?: TelexMember[] }>("/list-members", {
 			conversation_id: conversationId,
@@ -308,6 +323,25 @@ export class TelexClient {
 			identity_ids: identityIds,
 		});
 		return res.members ?? [];
+	}
+
+	async removeMembers(conversationId: string, identityIds: string[]): Promise<void> {
+		await this.post("/remove-members", {
+			conversation_id: conversationId,
+			identity_ids: identityIds,
+		});
+	}
+
+	async updateMemberRole(
+		conversationId: string,
+		identityId: string,
+		role: number,
+	): Promise<TelexConversation> {
+		const { conversation } = await this.post<{ conversation: TelexConversation }>(
+			"/update-member-role",
+			{ conversation_id: conversationId, identity_id: identityId, role },
+		);
+		return conversation;
 	}
 
 	async listMessages(params: {

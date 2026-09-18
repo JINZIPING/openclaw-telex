@@ -28,6 +28,9 @@ import { telexTimeMs } from "./types.js";
 
 // Activity expires server-side after 5s.
 const TYPING_KEEPALIVE_MS = 3000;
+
+const MENTION_TOKEN = /^(?:\[@[^\]]*\])?\(mention:[^)]+\)/;
+const SESSION_COMMAND = /^\/(?:new|reset)(?:\s|$)/i;
 // parentSessionKey inheritance carries the full transcript.
 const FORK_HISTORY_LIMIT = 50;
 const MISSED_CONTEXT_LIMIT = 50;
@@ -498,15 +501,18 @@ async function dispatchTelexTurn(params: {
 	}
 
 	const preview = params.messageText.replace(/\s+/g, " ").slice(0, 160);
-	core.system.enqueueSystemEvent(
-		isChannel
-			? `Telex[${accountId}] Channel(${conversationId}) from ${senderName}: ${preview}`
-			: `Telex[${accountId}] DM from ${senderName}: ${preview}`,
-		{
-			sessionKey: route.sessionKey,
-			contextKey: `telex:${conversationId}:${messageId}`,
-		},
-	);
+	// A session command short-circuits before the session is initialized, so an event queued for it
+	// lands in a transcript with no session header and every later load of that session throws.
+	if (!SESSION_COMMAND.test(params.messageText.replace(MENTION_TOKEN, "").trimStart()))
+		core.system.enqueueSystemEvent(
+			isChannel
+				? `Telex[${accountId}] Channel(${conversationId}) from ${senderName}: ${preview}`
+				: `Telex[${accountId}] DM from ${senderName}: ${preview}`,
+			{
+				sessionKey: route.sessionKey,
+				contextKey: `telex:${conversationId}:${messageId}`,
+			},
+		);
 
 	const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
 	const envelopeBody = core.channel.reply.formatAgentEnvelope({

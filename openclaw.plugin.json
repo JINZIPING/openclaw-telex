@@ -39,8 +39,12 @@
 							"getConversationInfo": { "type": "boolean" },
 							"createChannel": { "type": "boolean" },
 							"renameConversation": { "type": "boolean" },
+							"updateConversationSettings": { "type": "boolean" },
+							"deleteConversation": { "type": "boolean" },
 							"listMembers": { "type": "boolean" },
 							"addMembers": { "type": "boolean" },
+							"removeMembers": { "type": "boolean" },
+							"updateMemberRole": { "type": "boolean" },
 							"getConversationMessages": { "type": "boolean" }
 						}
 					},

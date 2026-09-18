@@ -14,8 +14,12 @@ export const TelexToolsConfigSchema = z
 		getConversationInfo: z.boolean().optional().default(true),
 		createChannel: z.boolean().optional().default(true),
 		renameConversation: z.boolean().optional().default(true),
+		updateConversationSettings: z.boolean().optional().default(true),
+		deleteConversation: z.boolean().optional().default(true),
 		listMembers: z.boolean().optional().default(true),
 		addMembers: z.boolean().optional().default(true),
+		removeMembers: z.boolean().optional().default(true),
+		updateMemberRole: z.boolean().optional().default(true),
 		getConversationMessages: z.boolean().optional().default(true),
 	})
 	.strict();

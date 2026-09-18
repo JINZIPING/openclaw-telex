@@ -88,8 +88,12 @@ When enabled, the plugin registers a `telex` tool so the agent can inspect Telex
 - `get_conversation_info` - a conversation's details
 - `create_channel` - create a channel
 - `rename_conversation` - retitle a channel or a non-default chat
+- `update_conversation_settings` - allow or deny channel members an action, and replace the announcement
+- `delete_conversation` - delete a channel the bot owns
 - `list_members` - members of a conversation
 - `add_members` - add members to a channel
+- `remove_members` - remove members from a channel
+- `update_member_role` - member, admin, or owner to hand the channel over
 - `get_conversation_messages` - messages in a conversation (chronological)
 
 Each action can be disabled under `channels.telex.tools`.
