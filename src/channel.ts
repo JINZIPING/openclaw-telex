@@ -9,6 +9,7 @@ import {
 import {
 	listTelexAccountIds,
 	resolveDefaultTelexAccountId,
+	resolveStoredAccountKey,
 	resolveTelexAccount,
 } from "./accounts.js";
 import { resolveTelexClient } from "./client.js";
@@ -70,6 +71,8 @@ export const telexPlugin: ChannelPlugin<ResolvedTelexAccount> = {
 				};
 			}
 			const telexCfg = cfg.channels?.telex as TelexConfig | undefined;
+			const accounts = telexCfg?.accounts;
+			const storedKey = resolveStoredAccountKey(accounts, accountId) ?? accountId;
 			return {
 				...cfg,
 				channels: {
@@ -77,8 +80,8 @@ export const telexPlugin: ChannelPlugin<ResolvedTelexAccount> = {
 					telex: {
 						...telexCfg,
 						accounts: {
-							...telexCfg?.accounts,
-							[accountId]: { ...telexCfg?.accounts?.[accountId], enabled },
+							...accounts,
+							[storedKey]: { ...accounts?.[storedKey], enabled },
 						},
 					},
 				},
@@ -96,7 +99,10 @@ export const telexPlugin: ChannelPlugin<ResolvedTelexAccount> = {
 			}
 			const telexCfg = cfg.channels?.telex as TelexConfig | undefined;
 			const accounts = { ...telexCfg?.accounts };
-			delete accounts[accountId];
+			const storedKey = resolveStoredAccountKey(accounts, accountId);
+			if (storedKey) {
+				delete accounts[storedKey];
+			}
 			return {
 				...cfg,
 				channels: {
@@ -143,6 +149,8 @@ export const telexPlugin: ChannelPlugin<ResolvedTelexAccount> = {
 				};
 			}
 			const telexCfg = cfg.channels?.telex as TelexConfig | undefined;
+			const accounts = telexCfg?.accounts;
+			const storedKey = resolveStoredAccountKey(accounts, accountId) ?? accountId;
 			return {
 				...cfg,
 				channels: {
@@ -150,8 +158,8 @@ export const telexPlugin: ChannelPlugin<ResolvedTelexAccount> = {
 					telex: {
 						...telexCfg,
 						accounts: {
-							...telexCfg?.accounts,
-							[accountId]: { ...telexCfg?.accounts?.[accountId], enabled: true },
+							...accounts,
+							[storedKey]: { ...accounts?.[storedKey], enabled: true },
 						},
 					},
 				},
