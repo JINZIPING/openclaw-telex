@@ -20,8 +20,8 @@ The wizard asks for the bot API key, the Voyager base URL, and DM/channel polici
 
 ## Get a bot API key
 
-1. Open Voyager Telex and register a bot (Settings -> Bots -> Register).
-2. Copy the one-time **plaintext API key** shown on registration.
+1. In Voyager, add a bot under Settings -> Telex Bots -> **Custom Bots**.
+2. Copy the one-time **plaintext API key** shown when it is created.
 3. The base URL is your Voyager host (default `https://voyager.ingarena.net`).
 
 The key authenticates as the bot identity; every message the plugin sends is attributed to that bot.
@@ -88,8 +88,12 @@ When enabled, the plugin registers a `telex` tool so the agent can inspect Telex
 - `get_conversation_info` - a conversation's details
 - `create_channel` - create a channel
 - `rename_conversation` - retitle a channel or a non-default chat
+- `update_conversation_settings` - allow or deny channel members an action, and replace the announcement
+- `delete_conversation` - delete a channel the bot owns
 - `list_members` - members of a conversation
 - `add_members` - add members to a channel
+- `update_member_role` - member, admin, or owner to hand the channel over
+- `remove_members` - remove members from a channel
 - `get_conversation_messages` - messages in a conversation (chronological)
 
 Each action can be disabled under `channels.telex.tools`.
