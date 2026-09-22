@@ -3,6 +3,7 @@ import {
 	type OpenClawConfig,
 	normalizeAccountId,
 } from "openclaw/plugin-sdk/core";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { ResolvedTelexAccount, TelexAccountConfig, TelexConfig } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://voyager.ingarena.net";
@@ -31,15 +32,27 @@ export function resolveDefaultTelexAccountId(cfg: OpenClawConfig): string {
 	return ids[0] ?? DEFAULT_ACCOUNT_ID;
 }
 
+export function resolveStoredAccountKey(
+	accounts: Record<string, unknown> | undefined,
+	accountId: string,
+): string | undefined {
+	if (!accounts || typeof accounts !== "object") {
+		return undefined;
+	}
+	if (Object.hasOwn(accounts, accountId)) {
+		return accountId;
+	}
+	const normalized = normalizeLowercaseStringOrEmpty(accountId);
+	return Object.keys(accounts).find((key) => normalizeLowercaseStringOrEmpty(key) === normalized);
+}
+
 function resolveAccountConfig(
 	cfg: OpenClawConfig,
 	accountId: string,
 ): TelexAccountConfig | undefined {
 	const accounts = (cfg.channels?.telex as TelexConfig)?.accounts;
-	if (!accounts || typeof accounts !== "object") {
-		return undefined;
-	}
-	return accounts[accountId];
+	const storedKey = resolveStoredAccountKey(accounts, accountId);
+	return storedKey === undefined ? undefined : accounts?.[storedKey];
 }
 
 function mergeTelexAccountConfig(cfg: OpenClawConfig, accountId: string): TelexConfig {
