@@ -10,7 +10,15 @@ import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-pay
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { readSessionUpdatedAt, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { checkGroupAccess, isTelexSenderAllowed } from "./access.js";
+import { handleTelexApprovalAnswer } from "./approval.js";
 import { type TelexClient, isAuthError, isConversationGone } from "./client.js";
+import {
+	answeredDetails,
+	handleTelexAnswer,
+	messageInteractionMarkup,
+	renderTelexReply,
+	sendTelexCard,
+} from "./interactive.js";
 import { logger } from "./log.js";
 import { mediaMarkdownLink, mediaPlaceholder, resolveInboundMedia } from "./media.js";
 import { getTelexRuntime } from "./runtime.js";
@@ -32,9 +40,12 @@ const TYPING_KEEPALIVE_MS = 3000;
 const FORK_HISTORY_LIMIT = 50;
 const MISSED_CONTEXT_LIMIT = 50;
 
+export type TelexTurn = { settled: Promise<void> };
+
 async function extractMessageContent(
 	client: TelexClient,
 	message: TelexMessage,
+	direct: boolean,
 ): Promise<{ text: string; media: InboundMediaFacts[] }> {
 	const textParts: string[] = [];
 	const placeholders: string[] = [];
@@ -44,6 +55,18 @@ async function extractMessageContent(
 		switch (block.type) {
 			case TelexBlockType.TEXT:
 				if (block.text?.trim()) textParts.push(block.text);
+				break;
+			case TelexBlockType.INTERACTION:
+				if (block.interaction) {
+					textParts.push(
+						messageInteractionMarkup(
+							message,
+							block.interaction,
+							client.getSelfId(),
+							direct,
+						),
+					);
+				}
 				break;
 			case TelexBlockType.IMAGE:
 			case TelexBlockType.VIDEO:
@@ -77,6 +100,18 @@ function historyMessageText(client: TelexClient, message: TelexMessage): string 
 		switch (block.type) {
 			case TelexBlockType.TEXT:
 				if (block.text?.trim()) parts.push(block.text);
+				break;
+			case TelexBlockType.INTERACTION:
+				if (block.interaction) {
+					parts.push(
+						messageInteractionMarkup(
+							message,
+							block.interaction,
+							client.getSelfId(),
+							false,
+						),
+					);
+				}
 				break;
 			case TelexBlockType.IMAGE:
 			case TelexBlockType.VIDEO:
@@ -172,7 +207,7 @@ export async function handleTelexMessage(params: {
 	client: TelexClient;
 	runtime?: RuntimeEnv;
 	message: TelexMessage;
-}): Promise<void> {
+}): Promise<TelexTurn | undefined> {
 	const { cfg, account, client, runtime, message } = params;
 	const log = logger("inbound");
 	const { accountId } = account;
@@ -183,6 +218,14 @@ export async function handleTelexMessage(params: {
 		seq: message.seq,
 		senderId: message.sender_id,
 	};
+
+	const answered = answeredDetails(message, client.getSelfId());
+	if (answered) {
+		log.info("interaction answered", { ...base, askedMessageId: answered.message_id });
+		if (await handleTelexApprovalAnswer({ cfg, client, details: answered })) return;
+		await handleTelexAnswer({ cfg, client, details: answered });
+		return;
+	}
 
 	// Ineligible hook: refresh cached conversation metadata on lifecycle events;
 	// hook failure is logged and never blocks settling - except conversation
@@ -260,7 +303,11 @@ export async function handleTelexMessage(params: {
 		}
 	}
 
-	const { text: messageText, media: mediaList } = await extractMessageContent(client, message);
+	const { text: messageText, media: mediaList } = await extractMessageContent(
+		client,
+		message,
+		!isChannel,
+	);
 	if (!messageText && mediaList.length === 0) {
 		log.info("skip: empty message", base);
 		return;
@@ -285,9 +332,9 @@ export async function handleTelexMessage(params: {
 		}
 	}
 
-	// Dispatch failures must propagate: the caller counts them toward the poison
-	// cap and leaves the message unsettled for repair to retry.
-	await dispatchTelexTurn({
+	// Dispatch errors before core admits the message must propagate: the caller counts them toward
+	// the poison cap and leaves the message unsettled for repair to retry.
+	const turn = await dispatchTelexTurn({
 		cfg,
 		account,
 		client,
@@ -304,9 +351,10 @@ export async function handleTelexMessage(params: {
 		forkOfConversationId: conversation.fork_of_conversation_id || undefined,
 		missedHistory,
 	});
-	// Only after a successful turn: a failed attempt's retry must still see the
+	// Only after admission: a failed attempt's retry must still see the
 	// pre-turn seq, or its mention-gap context would come up empty.
 	if (isChannel) client.noteTurnSeq(message.conversation_id, message.seq);
+	return turn;
 }
 
 async function resolveDmAccess(params: {
@@ -370,40 +418,50 @@ async function resolveDmAccess(params: {
 
 type TelexDelivery = AssembledInboundReply["delivery"];
 
-// The reply pipeline catches delivery errors into failedCounts instead of
-// rethrowing, so the last error is captured here and rethrown after dispatch -
-// a failed reply must count as a failed handle, not a settled one.
 function buildTelexDelivery(params: {
 	client: TelexClient;
+	account: ResolvedTelexAccount;
 	conversationId: string;
+	sessionKey: string;
 	chunkText: (text: string, limit: number) => string[];
 	log: ReturnType<typeof logger>;
-	accountId: string;
-}): { delivery: TelexDelivery; deliveryError: () => unknown } {
-	const { client, conversationId, chunkText, log, accountId } = params;
-	let lastError: unknown;
+}): TelexDelivery {
+	const { client, account, conversationId, sessionKey, chunkText, log } = params;
+	const accountId = account.accountId;
 	return {
-		delivery: {
-			deliver: async (payload) => {
-				const { trimmedText, mediaUrls, hasContent } =
-					resolveSendableOutboundReplyParts(payload);
-				if (!hasContent) return;
-				log.info("deliver", { accountId, conversationId, mediaCount: mediaUrls.length });
-				try {
-					await sendTelexMessage({
+		deliver: async (payload) => {
+			const { trimmedText, mediaUrls, hasContent } =
+				resolveSendableOutboundReplyParts(payload);
+			const { card, text } = await renderTelexReply(payload);
+			if (!hasContent && !card && !text) return;
+			log.info("deliver", {
+				accountId,
+				conversationId,
+				card: Boolean(card),
+				mediaCount: mediaUrls.length,
+			});
+			try {
+				const sent =
+					card &&
+					(await sendTelexCard({
 						client,
+						account,
 						conversationId,
-						text: trimmedText,
-						mediaUrls,
-						chunk: chunkText,
-					});
-				} catch (err) {
-					lastError = err;
-					throw err;
-				}
-			},
+						sessionKey,
+						card,
+					}));
+				await sendTelexMessage({
+					client,
+					conversationId,
+					text: sent ? "" : (text ?? trimmedText),
+					mediaUrls,
+					chunk: chunkText,
+				});
+			} catch (err) {
+				log.error("deliver failed", { accountId, conversationId, err: String(err) });
+				throw err;
+			}
 		},
-		deliveryError: () => lastError,
 	};
 }
 
@@ -423,7 +481,7 @@ async function dispatchTelexTurn(params: {
 	mediaList: InboundMediaFacts[];
 	forkOfConversationId?: string;
 	missedHistory?: { starterBody: string; historyBody: string };
-}): Promise<void> {
+}): Promise<TelexTurn | undefined> {
 	const { cfg, account, client, conversationId, chatType, senderId, senderName, messageId } =
 		params;
 	const log = logger("inbound");
@@ -559,12 +617,22 @@ async function dispatchTelexTurn(params: {
 	const chunkText = (text: string, limit: number) =>
 		core.channel.text.chunkMarkdownText(text, limit);
 
-	const { delivery, deliveryError } = buildTelexDelivery({
+	let admit!: () => void;
+	const admitted = new Promise<void>((resolve) => {
+		admit = resolve;
+	});
+	let settle!: () => void;
+	const settled = new Promise<void>((resolve) => {
+		settle = resolve;
+	});
+	let deferred = false;
+	const delivery = buildTelexDelivery({
 		client,
+		account,
 		conversationId,
+		sessionKey: route.sessionKey,
 		chunkText,
 		log: logger("outbound"),
-		accountId,
 	});
 
 	const { onModelSelected, ...replyPipeline } = createChannelMessageReplyPipeline({
@@ -601,7 +669,24 @@ async function dispatchTelexTurn(params: {
 			core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
 		delivery,
 		replyPipeline,
-		replyOptions: { onModelSelected, disableBlockStreaming: true },
+		replyOptions: {
+			onModelSelected,
+			disableBlockStreaming: true,
+			// Core drops a queued turn on a stop, a reset or its queue policy, which is final; only a
+			// turn lost with the process stays unsettled, to be read again after the restart.
+			turnAdoptionLifecycle: {
+				admission: "exclusive",
+				onAdopted: () => {
+					admit();
+					settle();
+				},
+				onDeferred: () => {
+					deferred = true;
+					admit();
+				},
+				onAbandoned: settle,
+			},
+		},
 		record: {
 			onRecordError: (err) =>
 				log.warn("record session failed", { accountId, err: String(err) }),
@@ -610,8 +695,14 @@ async function dispatchTelexTurn(params: {
 	};
 
 	log.info("dispatching to agent", { accountId, conversationId, sessionKey: route.sessionKey });
-	const result = await core.channel.inbound.dispatchReply(turn);
-	const sendFailure = deliveryError();
-	if (sendFailure) throw sendFailure;
-	log.info("dispatch complete", { accountId, conversationId, dispatched: result.dispatched });
+	const completion = core.channel.inbound.dispatchReply(turn).then((result) => {
+		log.info("dispatch complete", { accountId, conversationId, dispatched: result.dispatched });
+		if (!deferred) settle();
+	});
+	// A turn can wait on a later message of its own conversation (ask_user).
+	await Promise.race([admitted, completion]);
+	completion.catch((err) =>
+		log.error("turn failed after admission", { accountId, conversationId, err: String(err) }),
+	);
+	return { settled };
 }

@@ -39,7 +39,7 @@ export function checkGroupAccess(params: {
 }
 
 // Shared allowlist rule: trim; "*" allows all; exact id match; case-insensitive
-// email match. Reused by the DM path in bot.ts.
+// email match.
 export function isTelexSenderAllowed(
 	senderId: string,
 	email: string | undefined,
