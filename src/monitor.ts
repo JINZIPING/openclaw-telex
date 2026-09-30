@@ -1,8 +1,16 @@
+import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { listEnabledTelexAccounts, resolveTelexAccount } from "./accounts.js";
-import { handleTelexMessage } from "./bot.js";
-import { type TelexClient, isAuthError, isConversationGone, resolveTelexClient } from "./client.js";
+import { registerTelexApprovalRuntime } from "./approval.js";
+import { type TelexTurn, handleTelexMessage } from "./bot.js";
+import {
+	type TelexClient,
+	isAuthError,
+	isConversationGone,
+	resolveTelexClient,
+	subscribeIdleTimeoutMs,
+} from "./client.js";
 import { logger } from "./log.js";
 import type { ResolvedTelexAccount, TelexConversation, TelexMessage } from "./types.js";
 import { TelexMessageStatus } from "./types.js";
@@ -12,13 +20,12 @@ export type MonitorTelexOpts = {
 	runtime?: RuntimeEnv;
 	abortSignal?: AbortSignal;
 	accountId?: string;
+	channelRuntime?: ChannelRuntimeSurface;
 };
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
-// Keep this above the server keepalive interval to avoid false reconnects.
-const STALE_TIMEOUT_MS = 60_000;
 const PAGE = 100;
 const POISON_MAX_ATTEMPTS = 3;
 const MARK_DEBOUNCE_MS = 3_000;
@@ -164,9 +171,9 @@ function scheduleRepair(params: DispatchParams, conversationId: string, delay: n
 }
 
 // One dual-bound repair window: mark first (the watermark may already cover the
-// lag), read [cursor+1, cursor+PAGE], settle each row; a foreign in_progress row
-// stops the watermark but not the dispatch of later rows. Returns whether lag
-// remains.
+// lag), read [cursor+1, cursor+PAGE], settle or hold each row; a foreign
+// in_progress row stops the watermark but not the dispatch of later rows.
+// Returns whether lag remains.
 async function repairWindow(params: DispatchParams, conversationId: string): Promise<boolean> {
 	const { client } = params;
 	const log = logger("backfill");
@@ -201,8 +208,9 @@ async function repairWindow(params: DispatchParams, conversationId: string): Pro
 			client.settle(conversationId, message.seq);
 			continue;
 		}
+		let turn: TelexTurn | undefined;
 		try {
-			await handleTelexMessage({ ...params, message });
+			turn = await handleTelexMessage({ ...params, message });
 		} catch (err) {
 			// Conversation-gone / configuration errors are classified by the
 			// scheduler, not counted as poison.
@@ -210,7 +218,8 @@ async function repairWindow(params: DispatchParams, conversationId: string): Pro
 			notePoisonFailure(client, conversationId, message, err);
 			throw new Error(`handle failed at seq ${message.seq}: ${String(err)}`);
 		}
-		client.settle(conversationId, message.seq);
+		if (turn) settleWhenTaken(params, message, turn);
+		else client.settle(conversationId, message.seq);
 	}
 	await markInline();
 	return client.isLagging(conversationId);
@@ -245,8 +254,24 @@ function notePoisonFailure(
 	}
 }
 
+// A dispatched message is held until core takes or drops its turn, so neither
+// repair nor a replayed frame dispatches it again, and the read cursor stops
+// short of it until then.
+function settleWhenTaken(params: DispatchParams, message: TelexMessage, turn: TelexTurn): void {
+	const { account, client } = params;
+	const conversationId = message.conversation_id;
+	client.hold(conversationId, message.seq);
+	void turn.settled.then(() =>
+		enqueue(`${account.accountId}:${conversationId}`, async () => {
+			client.settle(conversationId, message.seq);
+			scheduleMark(params, conversationId);
+		}),
+	);
+}
+
 // The frame path: seed unknown conversations (the frame itself dispatches first,
-// repair covers the backlog before it), dedup by seq, settle or poison-count.
+// repair covers the backlog before it), dedup by seq, settle, hold or
+// poison-count.
 async function processFrame(params: DispatchParams & { message: TelexMessage }): Promise<void> {
 	const { account, client, message } = params;
 	const conversationId = message.conversation_id;
@@ -289,9 +314,13 @@ async function processFrame(params: DispatchParams & { message: TelexMessage }):
 		scheduleMark(params, conversationId);
 	} else {
 		try {
-			await handleTelexMessage(params);
-			client.settle(conversationId, message.seq);
-			scheduleMark(params, conversationId);
+			const turn = await handleTelexMessage(params);
+			if (turn) {
+				settleWhenTaken(params, message, turn);
+			} else {
+				client.settle(conversationId, message.seq);
+				scheduleMark(params, conversationId);
+			}
 		} catch (err) {
 			if (isConversationGone(err)) {
 				client.dropConversation(conversationId);
@@ -394,8 +423,9 @@ async function connectSingleAccount(params: {
 	account: ResolvedTelexAccount;
 	runtime?: RuntimeEnv;
 	abortSignal?: AbortSignal;
+	channelRuntime?: ChannelRuntimeSurface;
 }): Promise<void> {
-	const { cfg, account, runtime, abortSignal } = params;
+	const { cfg, account, runtime, abortSignal, channelRuntime } = params;
 	const { accountId } = account;
 	const log = logger("subscribe");
 
@@ -406,31 +436,31 @@ async function connectSingleAccount(params: {
 	const dispatchParams: DispatchParams = { cfg, account, client, runtime };
 
 	stoppedAccounts.delete(accountId);
-	const sweep = setInterval(() => void reconcile(dispatchParams), SWEEP_INTERVAL_MS);
+	let approvalsRegistered = false;
+	const registerApprovals = () => {
+		approvalsRegistered ||= registerTelexApprovalRuntime({
+			channelRuntime,
+			accountId,
+			client,
+			abortSignal,
+		});
+	};
+	const sweep = setInterval(() => {
+		void reconcile(dispatchParams);
+		if (!approvalsRegistered) {
+			void client.ensureSelfIdentity().then(registerApprovals, (err) => {
+				log.warn("get-identity retry failed", { accountId, err: String(err) });
+			});
+		}
+	}, SWEEP_INTERVAL_MS);
 	let backoff = INITIAL_BACKOFF_MS;
 
 	try {
 		while (!abortSignal?.aborted) {
-			const attempt = new AbortController();
-			const onOuterAbort = () => attempt.abort();
-			abortSignal?.addEventListener("abort", onOuterAbort, { once: true });
-
-			let staleTimer: ReturnType<typeof setTimeout> | undefined;
-			const armStale = () => {
-				if (staleTimer) clearTimeout(staleTimer);
-				staleTimer = setTimeout(() => {
-					log.warn("stream silent, reconnecting", {
-						accountId,
-						timeoutMs: STALE_TIMEOUT_MS,
-					});
-					attempt.abort();
-				}, STALE_TIMEOUT_MS);
-			};
-
 			let reconciled = false;
 			try {
 				log.info("connecting", { accountId, baseUrl: account.baseUrl });
-				await client.ensureSelfId().catch((err) => {
+				await client.ensureSelfIdentity().catch((err) => {
 					// Never blocks the stream: seeding arms the identity from
 					// membership rows before any dispatch.
 					if (isAuthError(err)) {
@@ -451,9 +481,8 @@ async function connectSingleAccount(params: {
 						);
 					}
 				});
-				armStale();
-				await client.subscribe(attempt.signal, (event) => {
-					armStale();
+				registerApprovals();
+				await client.subscribe(abortSignal, (event) => {
 					backoff = INITIAL_BACKOFF_MS;
 					// The first frame is the server's readiness signal: the subscription
 					// is live, so reconciling now cannot miss messages in between.
@@ -479,18 +508,21 @@ async function connectSingleAccount(params: {
 				});
 				log.info("stream closed by server", { accountId });
 			} catch (err) {
-				if (abortSignal?.aborted || attempt.signal.aborted) {
-					// Expected shutdown or stale reconnect.
+				const idleTimeoutMs = subscribeIdleTimeoutMs(err);
+				if (abortSignal?.aborted) {
+					// Expected shutdown.
 				} else if (isAuthError(err)) {
 					throw new Error(
 						`Telex subscribe rejected for account "${accountId}": check apiKey and scopes (${String(err)})`,
 					);
+				} else if (idleTimeoutMs) {
+					log.warn("stream silent, reconnecting", {
+						accountId,
+						timeoutMs: idleTimeoutMs,
+					});
 				} else {
 					log.error("subscribe error", { accountId, err: String(err) });
 				}
-			} finally {
-				if (staleTimer) clearTimeout(staleTimer);
-				abortSignal?.removeEventListener("abort", onOuterAbort);
 			}
 
 			if (abortSignal?.aborted) break;
@@ -525,6 +557,7 @@ export async function monitorTelexProvider(opts: MonitorTelexOpts = {}): Promise
 			account,
 			runtime: opts.runtime,
 			abortSignal: opts.abortSignal,
+			channelRuntime: opts.channelRuntime,
 		});
 	}
 
@@ -545,6 +578,7 @@ export async function monitorTelexProvider(opts: MonitorTelexOpts = {}): Promise
 				account,
 				runtime: opts.runtime,
 				abortSignal: opts.abortSignal,
+				channelRuntime: opts.channelRuntime,
 			}),
 		),
 	);

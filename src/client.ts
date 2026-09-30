@@ -3,6 +3,7 @@ import type {
 	TelexBlock,
 	TelexConversation,
 	TelexIdentityBrief,
+	TelexInteractionAnswer,
 	TelexMedia,
 	TelexMember,
 	TelexMessage,
@@ -11,6 +12,8 @@ import type {
 
 const HTTP_TIMEOUT_MS = 15_000;
 const FILE_TIMEOUT_MS = 60_000;
+// Three of the server's 15-second ping comments; any bytes received reset it.
+const SUBSCRIBE_IDLE_TIMEOUT_MS = 45_000;
 const SENT_IDS_MAX = 2_000;
 const IDENTITY_CACHE_MAX = 2_000;
 const CONVERSATION_CACHE_MAX = 2_000;
@@ -52,7 +55,11 @@ function writeCache<V>(map: Map<string, CacheEntry<V>>, key: string, value: V, m
 	lruSet(map, key, { value, expiresAt: Date.now() + CACHE_TTL_MS }, max);
 }
 
-type ApiError = { httpStatus?: number; apiMessage?: string };
+type ApiError = { httpStatus?: number; apiMessage?: string; detail?: unknown };
+
+export function apiErrorDetail(err: unknown): unknown {
+	return (err as ApiError).detail;
+}
 
 // 403 carries both "insufficient scope" (a key configuration error) and
 // "not a member" (conversation-level); branch on the stable body code. In-stream
@@ -71,6 +78,10 @@ export function isAuthError(err: unknown): boolean {
 		apiMessage === "invalid_api_key" ||
 		apiMessage === "api_key_empty"
 	);
+}
+
+export function subscribeIdleTimeoutMs(err: unknown): number | undefined {
+	return (err as { idleTimeoutMs?: number }).idleTimeoutMs;
 }
 
 export async function fetchWithTimeout(
@@ -93,14 +104,23 @@ export class TelexClient {
 
 	// Sent ids cover self-echoes before a send response reveals selfId.
 	private selfId: string | null;
+	// A user's identity id is the user id, so the owner id also names the owner's identity.
+	private ownerId: string | null = null;
 	private sentMessageIds = new Map<string, true>();
 
 	// Per-conversation message-sync state: cursor = local cache of the server
 	// read_seq (everything at or below it is settled), settled = the disposed
-	// seqs above it, poison = handle failure counts.
+	// seqs above it, held = seqs handed to a turn core has not yet taken or
+	// dropped, poison = handle failure counts.
 	private sync = new Map<
 		string,
-		{ cursor: number; settled: Set<number>; maxSeen: number; poison: Map<number, number> }
+		{
+			cursor: number;
+			settled: Set<number>;
+			held: Set<number>;
+			maxSeen: number;
+			poison: Map<number, number>;
+		}
 	>();
 
 	// Require-mention channels backfill context from the last agent turn.
@@ -133,10 +153,12 @@ export class TelexClient {
 		if (!res.ok) {
 			const code = (data as { code?: number }).code;
 			const message = (data as { message?: string }).message ?? `HTTP ${res.status}`;
+			const details = (data as { details?: { detail?: unknown }[] }).details;
 			throw Object.assign(new Error(`Telex API error: ${message}`), {
 				httpStatus: res.status,
 				code,
 				apiMessage: (data as { message?: string }).message,
+				detail: details?.[0]?.detail,
 			});
 		}
 		return data as T;
@@ -164,6 +186,28 @@ export class TelexClient {
 
 		const { message } = await this.post<{ message: TelexMessage }>("/send-message", body);
 		this.recordSent(message);
+		return message;
+	}
+
+	async closeInteraction(messageId: string, interactionId: string): Promise<void> {
+		await this.post("/close-interaction", {
+			message_id: messageId,
+			interaction_id: interactionId,
+		});
+	}
+
+	async answerInteraction(params: {
+		messageId: string;
+		interactionId: string;
+		answers?: TelexInteractionAnswer[];
+		skip?: boolean;
+	}): Promise<TelexMessage> {
+		const { message } = await this.post<{ message: TelexMessage }>("/answer-interaction", {
+			message_id: params.messageId,
+			interaction_id: params.interactionId,
+			answers: params.answers,
+			skip: params.skip,
+		});
 		return message;
 	}
 
@@ -415,40 +459,50 @@ export class TelexClient {
 	}
 
 	async subscribe(
-		abortSignal: AbortSignal,
+		abortSignal: AbortSignal | undefined,
 		onEvent: (event: TelexSubscribeEvent) => void,
 	): Promise<void> {
-		const res = await fetch(`${this.baseUrl}${OPENAPI_PREFIX}/subscribe`, {
-			headers: { "x-api-key": this.apiKey, Accept: "application/json" },
-			signal: abortSignal,
-		});
-		if (res.status !== 200 || !res.body) {
-			const detail = await res.text().catch(() => "");
-			let apiMessage: string | undefined;
-			try {
-				apiMessage = (JSON.parse(detail) as { message?: string }).message;
-			} catch {
-				// Non-JSON error body; classification falls back to the status.
-			}
-			throw Object.assign(new Error(`Telex subscribe failed: HTTP ${res.status} ${detail}`), {
-				httpStatus: res.status,
-				apiMessage,
+		const controller = new AbortController();
+		const onAbort = () => controller.abort();
+		abortSignal?.addEventListener("abort", onAbort, { once: true });
+		let timedOut = false;
+		const idleTimer = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, SUBSCRIBE_IDLE_TIMEOUT_MS);
+		try {
+			const res = await fetch(`${this.baseUrl}${OPENAPI_PREFIX}/subscribe`, {
+				headers: { "x-api-key": this.apiKey, Accept: "text/event-stream" },
+				signal: controller.signal,
 			});
-		}
+			if (res.status !== 200 || !res.body) {
+				const detail = await res.text().catch(() => "");
+				let apiMessage: string | undefined;
+				try {
+					apiMessage = (JSON.parse(detail) as { message?: string }).message;
+				} catch {
+					// Non-JSON error body; classification falls back to the status.
+				}
+				throw Object.assign(
+					new Error(`Telex subscribe failed: HTTP ${res.status} ${detail}`),
+					{ httpStatus: res.status, apiMessage },
+				);
+			}
+			const contentType = res.headers.get("content-type") ?? "";
+			if (!contentType.startsWith("text/event-stream")) {
+				throw new Error(
+					`Telex subscribe failed: expected text/event-stream, got ${contentType}`,
+				);
+			}
 
-		const reader = res.body.getReader();
-		const decoder = new TextDecoder();
-		let buffer = "";
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) return;
-			buffer += decoder.decode(value, { stream: true });
-			while (true) {
-				const nl = buffer.indexOf("\n");
-				if (nl < 0) break;
-				const line = buffer.slice(0, nl).trim();
-				buffer = buffer.slice(nl + 1);
-				if (!line) continue;
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			let data: string[] = [];
+			const dispatch = () => {
+				if (data.length === 0) return;
+				const text = data.join("\n");
+				data = [];
 				// grpc-gateway wraps each server-streaming frame as {"result": <Response>}
 				// and a terminal stream error as {"error": {...}}.
 				let parsed: {
@@ -456,9 +510,9 @@ export class TelexClient {
 					error?: { message?: string; code?: number };
 				};
 				try {
-					parsed = JSON.parse(line);
+					parsed = JSON.parse(text);
 				} catch {
-					continue;
+					return;
 				}
 				if (parsed.error) {
 					throw Object.assign(
@@ -469,7 +523,39 @@ export class TelexClient {
 					);
 				}
 				if (parsed.result) onEvent(parsed.result);
+			};
+			while (true) {
+				const { done, value } = await reader.read();
+				idleTimer.refresh();
+				buffer += decoder.decode(value, { stream: !done });
+				const lines = buffer.split("\n");
+				buffer = lines.pop() ?? "";
+				for (const raw of lines) {
+					const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+					if (line === "") {
+						dispatch();
+						continue;
+					}
+					if (line.startsWith(":")) continue;
+					const colon = line.indexOf(":");
+					if ((colon < 0 ? line : line.slice(0, colon)) !== "data") continue;
+					const value = colon < 0 ? "" : line.slice(colon + 1);
+					data.push(value.startsWith(" ") ? value.slice(1) : value);
+				}
+				if (done) return;
 			}
+		} catch (err) {
+			if (timedOut) {
+				throw Object.assign(
+					new Error(`Telex subscribe stream silent for ${SUBSCRIBE_IDLE_TIMEOUT_MS}ms`),
+					{ idleTimeoutMs: SUBSCRIBE_IDLE_TIMEOUT_MS },
+				);
+			}
+			throw err;
+		} finally {
+			clearTimeout(idleTimer);
+			abortSignal?.removeEventListener("abort", onAbort);
+			controller.abort();
 		}
 	}
 
@@ -485,12 +571,23 @@ export class TelexClient {
 		if (trimmed) this.selfId = trimmed;
 	}
 
-	// Without it, backfilled own messages dispatch as inbound and channel
+	// Without the self id, backfilled own messages dispatch as inbound and channel
 	// mentions are settled as ineligible until the first send reveals the id.
-	async ensureSelfId(): Promise<void> {
-		if (this.selfId) return;
-		const { identity } = await this.get<{ identity?: { id?: string } }>("/get-identity");
-		if (identity?.id) this.selfId = identity.id;
+	async ensureSelfIdentity(): Promise<void> {
+		if (this.selfId && this.ownerId) return;
+		const { identity } = await this.get<{ identity?: { id?: string; owner_id?: string } }>(
+			"/get-identity",
+		);
+		if (!this.selfId && identity?.id) this.selfId = identity.id;
+		if (identity?.owner_id) this.ownerId = identity.owner_id;
+	}
+
+	getSelfId(): string | null {
+		return this.selfId;
+	}
+
+	getOwnerId(): string | null {
+		return this.ownerId;
 	}
 
 	isOwnMessage(message: TelexMessage): boolean {
@@ -512,7 +609,13 @@ export class TelexClient {
 	seedConversation(conversationId: string, cursor: number, maxSeen: number): void {
 		let state = this.sync.get(conversationId);
 		if (!state) {
-			state = { cursor: 0, settled: new Set(), maxSeen: 0, poison: new Map() };
+			state = {
+				cursor: 0,
+				settled: new Set(),
+				held: new Set(),
+				maxSeen: 0,
+				poison: new Map(),
+			};
 			this.sync.set(conversationId, state);
 		}
 		this.updateCursor(conversationId, cursor);
@@ -538,12 +641,18 @@ export class TelexClient {
 
 	isDisposed(conversationId: string, seq: number): boolean {
 		const state = this.sync.get(conversationId);
-		return !state || seq <= state.cursor || state.settled.has(seq);
+		return !state || seq <= state.cursor || state.settled.has(seq) || state.held.has(seq);
+	}
+
+	hold(conversationId: string, seq: number): void {
+		const state = this.sync.get(conversationId);
+		if (state && seq > state.cursor) state.held.add(seq);
 	}
 
 	settle(conversationId: string, seq: number): void {
 		const state = this.sync.get(conversationId);
 		if (!state) return;
+		state.held.delete(seq);
 		if (seq > state.cursor) state.settled.add(seq);
 		state.maxSeen = Math.max(state.maxSeen, seq);
 	}
